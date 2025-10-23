@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Render Đồ Họa Cực Cao (Phiên bản ổn định)</title>
+    <!-- Tải Tailwind CSS để tạo giao diện đẹp và responsive -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Sử dụng font Inter cho thẩm mỹ */
+        body { font-family: 'Inter', sans-serif; background-color: #1a1a2e; } /* Nền đen sâu */
+        
+        /* Tùy chỉnh spinner */
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-top: 4px solid #6366f1; /* Màu tím */
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .file-input-label {
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .file-input-label:hover {
+            background-color: #4f46e5;
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
+        }
+        /* Fixed height for image containers */
+        .image-container {
+            height: 320px; /* Chiều cao cố định */
+            width: 100%;
+        }
+        .image-preview {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain; /* Giữ tỷ lệ và fit vào khung */
+            border-radius: 4px;
+        }
+    </style>
+    <script>
+        // Các biến toàn cục được cung cấp bởi môi trường Canvas
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const MODEL_NAME = "gemini-2.5-flash-image-preview"; // Tách MODEL_NAME ra để dùng lại
+
+        let uploadedBase64 = null;
+        let uploadedMimeType = null;
+        let renderedImageUrl = null;
+
+        // --- HÀM TIỆN ÍCH ---
+
+        /**
+         * Chuyển đổi File sang Base64
+         * @param {File} file
+         * @returns {Promise<string>} Base64 data string
+         */
+        function fileToBase64(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = () => resolve(reader.result.split(',')[1]);
+                reader.onerror = error => reject(error);
+            });
+        }
+
+        /**
+         * Thực hiện Fetch với chiến lược Exponential Backoff để xử lý lỗi mạng/throttling.
+         */
+        async function retryFetchWithBackoff(url, options, maxRetries = 5) {
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (response.ok) {
+                        return response;
+                    }
+                    if (response.status === 429 || response.status >= 500) {
+                        const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
+                        console.warn(`Retry attempt ${i + 1} failed with status ${response.status}. Retrying in ${delay.toFixed(0)}ms...`);
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        continue;
+                    }
+                    // Đối với các lỗi khác, thoát khỏi vòng lặp và ném lỗi
+                    // Thêm kiểm tra an toàn cho response.json()
+                    const contentType = response.headers.get("content-type");
+                    if (contentType && contentType.indexOf("application/json") !== -1) {
+                         const errorJson = await response.json();
+                         throw new Error(`API Error ${response.status}: ${JSON.stringify(errorJson)}`);
+                    } else {
+                         const errorText = await response.text();
+                         throw new Error(`API Error ${response.status}. Server response was not JSON: ${errorText.substring(0, 100)}...`);
+                    }
+
+                } catch (error) {
+                    if (i === maxRetries - 1) throw error;
+                    // Đối với lỗi mạng, thử lại
+                    const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
+                    console.warn(`Network error during attempt ${i + 1}. Retrying in ${delay.toFixed(0)}ms...`, error);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+        }
+
+
+        // --- LOGIC ỨNG DỤNG ---
+
+        /**
+         * Cập nhật trạng thái tải và các nút
+         * @param {boolean} isLoading
+         */
+        function setLoadingState(isLoading) {
+            const startBtn = document.getElementById('startBtn');
+            const loadingIndicator = document.getElementById('loadingIndicator');
+
+            startBtn.disabled = isLoading;
+            if (isLoading) {
+                startBtn.innerHTML = '<div class="spinner border-white border-t-white/50 w-5 h-5"></div> Đang Render...';
+                loadingIndicator.classList.remove('hidden');
+                document.getElementById('downloadBtn').disabled = true;
+                document.getElementById('statusMessage').textContent = 'Đang gửi yêu cầu đến AI...';
+            } else {
+                startBtn.innerHTML = 'Bắt đầu Render (Start)';
+                loadingIndicator.classList.add('hidden');
+            }
+        }
+
+        /**
+         * Xử lý file ảnh được chọn
+         */
+        async function handleImageUpload(event) {
+            const file = event.target.files[0];
+            const originalPreview = document.getElementById('originalPreview');
+            const renderedPreview = document.getElementById('renderedPreview');
+            const statusMessage = document.getElementById('statusMessage');
+            const startBtn = document.getElementById('startBtn');
+
+            if (!file || !file.type.startsWith('image/')) {
+                statusMessage.textContent = 'Vui lòng chọn một file ảnh hợp lệ.';
+                startBtn.disabled = true;
+                originalPreview.src = '';
+                originalPreview.classList.add('hidden');
+                renderedPreview.src = ''; // Xóa ảnh render cũ
+                renderedPreview.classList.add('hidden');
+                return;
+            }
+
+            try {
+                // Hiển thị hình ảnh gốc
+                originalPreview.src = URL.createObjectURL(file);
+                // Đảm bảo ảnh gốc hiển thị ngay
+                originalPreview.classList.remove('hidden');
+
+                // Xóa ảnh render cũ
+                renderedPreview.src = ''; 
+                renderedPreview.classList.add('hidden');
+                document.getElementById('downloadBtn').disabled = true;
+
+                // Chuyển đổi và lưu Base64
+                uploadedBase64 = await fileToBase64(file);
+                uploadedMimeType = file.type;
+
+                statusMessage.textContent = `Đã tải lên: ${file.name}. Sẵn sàng để Render.`;
+                startBtn.disabled = false;
+            } catch (error) {
+                statusMessage.textContent = 'Lỗi khi đọc file: ' + error.message;
+                console.error('Lỗi khi đọc file:', error);
+                startBtn.disabled = true;
+            }
+        }
+
+        /**
+         * Gọi API Gemini để render lại hình ảnh
+         */
+        async function startRendering() {
+            if (!uploadedBase64) {
+                document.getElementById('statusMessage').textContent = 'Lỗi: Vui lòng tải lên hình ảnh trước.';
+                return;
+            }
+
+            setLoadingState(true);
+            const renderedPreview = document.getElementById('renderedPreview');
+            
+            // Đảm bảo ẩn hoàn toàn và xóa nguồn trước khi render mới
+            renderedPreview.src = '';
+            renderedPreview.classList.add('hidden');
+
+            // --- ĐÃ LOẠI BỎ KHUNG NHẬP KEY API ---
+            // Sử dụng chuỗi rỗng để Canvas tự động inject API Key (theo cấu hình môi trường)
+            const finalApiKey = ""; 
+            
+            // Cấu hình URL API với key
+            const API_URL_WITH_KEY = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${finalApiKey}`;
+
+
+            // CẤU HÌNH PROMPT ĐÃ ĐƯỢC TỐI ƯU
+            const systemInstruction = ""; // Bỏ trống
+            // Prompt hiện tại
+            const userPrompt = "render lại hình này với đồ họa cực cao, ko thay đổỉ texture, bóng loáng, shadow mạnh"; 
+
+            const payload = {
+                contents: [{
+                    parts: [
+                        { text: userPrompt },
+                        {
+                            inlineData: {
+                                mimeType: uploadedMimeType,
+                                data: uploadedBase64
+                            }
+                        }
+                    ]
+                }],
+                generationConfig: {
+                    responseModalities: ['IMAGE'],
+                },
+                systemInstruction: {
+                    parts: [{ text: systemInstruction }] // Gửi chuỗi rỗng
+                }
+            };
+
+            try {
+                const response = await retryFetchWithBackoff(API_URL_WITH_KEY, { // SỬ DỤNG API_URL MỚI
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                // --- KIỂM TRA PHÒNG NGỪA LỖI (FIX) ---
+                if (!response) {
+                    throw new Error("Không nhận được phản hồi từ API sau nhiều lần thử lại. Vui lòng kiểm tra lại kết nối và API Key.");
+                }
+                // ------------------------------------
+                
+                const result = await response.json();
+                
+                // Lấy finishReason
+                const finishReason = result?.candidates?.[0]?.finishReason;
+
+                // Lấy dữ liệu hình ảnh (inlineData) đầu tiên trong danh sách parts
+                const imagePart = result?.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+                const base64Data = imagePart?.inlineData?.data;
+
+                if (!base64Data) {
+                    const errorText = JSON.stringify(result, null, 2);
+                    
+                    let errorMessage = 'Lỗi API: Không nhận được dữ liệu hình ảnh.';
+                    
+                    if (finishReason === 'NO_IMAGE') {
+                        // Thông báo lỗi chi tiết cho trường hợp NO_IMAGE
+                        errorMessage = 'Render bị chặn: AI không tạo hình ảnh (NO_IMAGE). Thường do hình ảnh gốc hoặc nội dung yêu cầu vi phạm chính sách an toàn. Vui lòng thử hình ảnh khác hoặc thay đổi prompt.';
+                    } else {
+                        errorMessage += (result?.error?.message ? ` Chi tiết: ${result.error.message}` : ' Lỗi không xác định.');
+                    }
+                    
+                    document.getElementById('statusMessage').textContent = errorMessage;
+                    console.error('Lỗi API:', errorText);
+                    return;
+                }
+
+                renderedImageUrl = `data:image/png;base64,${base64Data}`;
+                renderedPreview.src = renderedImageUrl;
+                renderedPreview.classList.remove('hidden'); // Hiển thị sau khi gán nguồn
+
+                document.getElementById('statusMessage').textContent = 'Render thành công! Bạn có thể tải xuống hình ảnh.';
+                document.getElementById('downloadBtn').disabled = false;
+
+            } catch (error) {
+                document.getElementById('statusMessage').textContent = 'Lỗi Render: ' + error.message;
+                console.error('Lỗi Render:', error);
+            } finally {
+                setLoadingState(false);
+            }
+        }
+
+        /**
+         * Tải xuống hình ảnh đã render
+         */
+        function downloadImage() {
+            if (!renderedImageUrl) {
+                document.getElementById('statusMessage').textContent = 'Chưa có hình ảnh nào được render để tải xuống.';
+                return;
+            }
+
+            const link = document.createElement('a');
+            link.href = renderedImageUrl;
+            link.download = `rendered_high_graphics_${Date.now()}.png`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            document.getElementById('statusMessage').textContent = 'Hình ảnh đã được tải xuống.';
+        }
+
+        // --- SETUP KHI TẢI TRANG HOÀN TẤT ---
+        window.onload = function() {
+            document.getElementById('imageFile').addEventListener('change', handleImageUpload);
+            document.getElementById('startBtn').addEventListener('click', startRendering);
+            document.getElementById('downloadBtn').addEventListener('click', downloadImage);
+
+            // Khởi tạo trạng thái ban đầu
+            setLoadingState(false);
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('statusMessage').textContent = 'Vui lòng chọn hình ảnh để bắt đầu.';
+        }
+
+    </script>
+</head>
+<body class="bg-gray-900 min-h-screen p-4 sm:p-8">
+
+    <div class="max-w-4xl mx-auto bg-gray-800 shadow-2xl shadow-indigo-900/50 rounded-xl p-6 sm:p-8">
+
+        <h1 class="text-3xl font-bold text-white mb-6 border-b border-gray-700 pb-2">
+            🎨 AI Render Đồ Họa Cực Cao (Phiên bản ổn định)
+        </h1>
+
+        <!-- Hướng dẫn Setup cho Canvas/GitHub -->
+        <div class="bg-indigo-900/30 p-4 rounded-lg text-sm text-indigo-300 mb-6 border border-indigo-700">
+            <p class="font-bold mb-1">⚙️ Hướng dẫn Setup Key API:</p>
+            <p>Ứng dụng này được thiết kế để hoạt động trong môi trường **Canvas/Code Editor**.</p>
+            <ul class="list-disc list-inside mt-1 ml-2">
+                <li>Trong môi trường này, Key API Gemini được **tự động cung cấp** qua các biến môi trường ẩn.</li>
+                <li>Nếu bạn triển khai code này trên các nền tảng khác (ví dụ: GitHub Pages), bạn cần thiết lập một cơ chế để đưa Key API của mình vào biến `finalApiKey` trong hàm `startRendering()` để ứng dụng hoạt động.</li>
+            </ul>
+        </div>
+
+        <!-- Khu vực điều khiển -->
+        <div class="space-y-6 mb-8">
+            
+            <!-- Nút Import Hình Ảnh -->
+            <div>
+                <label for="imageFile" class="file-input-label block w-full text-center bg-indigo-600 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 inline-block mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                    </svg>
+                    Import Hình Ảnh (Import Image)
+                </label>
+                <input type="file" id="imageFile" accept="image/*" class="hidden">
+            </div>
+
+            <!-- Nút Bắt đầu Render -->
+            <button id="startBtn" onclick="startRendering()" class="w-full flex justify-center items-center bg-green-600 text-white font-bold py-3 px-6 rounded-lg shadow-lg hover:bg-green-700 transition duration-300 ease-in-out disabled:bg-gray-600 disabled:cursor-not-allowed" disabled>
+                Bắt đầu Render (Start)
+            </button>
+            
+            <!-- Thông báo trạng thái -->
+            <div id="statusMessage" class="text-center text-sm font-medium text-indigo-400">
+                Vui lòng chọn hình ảnh để bắt đầu.
+            </div>
+
+            <!-- Loading Indicator -->
+            <div id="loadingIndicator" class="hidden flex justify-center py-4">
+                <div class="spinner"></div>
+            </div>
+        </div>
+
+        <!-- Khu vực xem trước và tải xuống -->
+        <div class="grid md:grid-cols-2 gap-6">
+            <!-- Hình ảnh Gốc -->
+            <div class="bg-gray-700 p-4 rounded-lg shadow-inner border border-gray-600">
+                <h3 class="text-lg font-semibold text-gray-200 mb-3">Hình Ảnh Gốc (Original Image)</h3>
+                <div class="image-container flex justify-center items-center rounded-md bg-gray-900/50">
+                    <img id="originalPreview" src="" alt="Hình ảnh gốc" class="image-preview hidden">
+                </div>
+            </div>
+            
+            <!-- Hình ảnh đã Render -->
+            <div class="bg-gray-700 p-4 rounded-lg shadow-inner border border-gray-600">
+                <h3 class="text-lg font-semibold text-gray-200 mb-3">Hình Ảnh Đã Render (Rendered Image)</h3>
+                <div class="image-container flex justify-center items-center rounded-md bg-gray-900/50">
+                    <img id="renderedPreview" src="" alt="Hình ảnh đã render" class="image-preview hidden">
+                </div>
+
+                <!-- Nút Tải Xuống -->
+                <button id="downloadBtn" onclick="downloadImage()" class="mt-4 w-full flex justify-center items-center bg-blue-600 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-blue-700 transition duration-300 ease-in-out disabled:bg-gray-600 disabled:cursor-not-allowed" disabled>
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+                      <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L10 12.586l2.293-2.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" />
+                    </svg>
+                    Tải Xuống (Download)
+                </button>
+            </div>
+        </div>
+
+    </div>
+</body>
+</html>
