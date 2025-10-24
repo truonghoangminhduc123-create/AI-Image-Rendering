@@ -1,19 +1,24 @@
 <!DOCTYPE html>
-<html lang="vi">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Render Đồ Họa Cực Cao (Phiên bản ổn định)</title>
-    <!-- Tải Tailwind CSS để tạo giao diện đẹp và responsive -->
+    <title>AI High-Graphics Image Renderer (Stable Version)</title>
+    <!-- Load Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        /* Sử dụng font Inter cho thẩm mỹ */
-        body { font-family: 'Inter', sans-serif; background-color: #1a1a2e; } /* Nền đen sâu */
+        /* Use monospace font for the CMD/terminal feel */
+        body { font-family: 'monospace'; background-color: #000000; } /* Pure Black background */
         
-        /* Tùy chỉnh spinner */
+        /* Default text color is white */
+        body, h1, h2, h3, label, option, select, button, #statusMessage {
+            color: #FFFFFF;
+        }
+
+        /* Custom spinner style */
         .spinner {
             border: 4px solid rgba(255, 255, 255, 0.3);
-            border-top: 4px solid #6366f1; /* Màu tím */
+            border-top: 4px solid #FFFFFF; /* White for the spinner */
             border-radius: 50%;
             width: 40px;
             height: 40px;
@@ -23,41 +28,78 @@
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
-        .file-input-label {
-            cursor: pointer;
+
+        /* Black button with white outline */
+        .btn-black-outline {
+            background-color: #000000;
+            border: 1px solid #FFFFFF;
+            color: #FFFFFF;
+            font-weight: bold;
+            padding: 12px 24px;
+            border-radius: 8px;
+            box-shadow: none;
             transition: all 0.2s;
         }
-        .file-input-label:hover {
-            background-color: #4f46e5;
-            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
+        .btn-black-outline:hover:not(:disabled) {
+            background-color: #333333; /* Slightly gray on hover */
+            border-color: #FFFFFF;
+            box-shadow: 0 0 10px rgba(255, 255, 255, 0.5); /* White glow effect */
         }
+        .btn-black-outline:disabled {
+            background-color: #333333;
+            border-color: #666666;
+            color: #BBBBBB;
+            cursor: not-allowed;
+        }
+
+        /* Input/Select fields styling */
+        .dark-input-select {
+            background-color: #000000;
+            border: 1px solid #FFFFFF;
+            color: #FFFFFF;
+            border-radius: 8px;
+            padding: 8px 12px;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .dark-input-select:focus {
+            outline: none;
+            border-color: #AAAAAA;
+            box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.3);
+        }
+
         /* Fixed height for image containers */
         .image-container {
-            height: 320px; /* Chiều cao cố định */
+            height: 320px; /* Fixed height */
             width: 100%;
         }
         .image-preview {
             max-width: 100%;
             max-height: 100%;
-            object-fit: contain; /* Giữ tỷ lệ và fit vào khung */
+            object-fit: contain; /* Maintain aspect ratio and fit into frame */
             border-radius: 4px;
+            border: 1px solid #333333; /* Subtle border for images */
+        }
+
+        /* Styling for setup guide section */
+        .setup-guide {
+            background-color: #111111; /* Dark gray background */
+            border: 1px solid #333333; /* Subtle border */
+            color: #CCCCCC;
         }
     </style>
     <script>
-        // Các biến toàn cục được cung cấp bởi môi trường Canvas
+        // Global variables provided by the Canvas environment
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const MODEL_NAME = "gemini-2.5-flash-image-preview"; // Tách MODEL_NAME ra để dùng lại
+        const MODEL_NAME = "gemini-2.5-flash-image-preview"; 
 
         let uploadedBase64 = null;
         let uploadedMimeType = null;
         let renderedImageUrl = null;
 
-        // --- HÀM TIỆN ÍCH ---
+        // --- UTILITY FUNCTIONS ---
 
         /**
-         * Chuyển đổi File sang Base64
-         * @param {File} file
-         * @returns {Promise<string>} Base64 data string
+         * Converts a File object to a Base64 string
          */
         function fileToBase64(file) {
             return new Promise((resolve, reject) => {
@@ -69,7 +111,7 @@
         }
 
         /**
-         * Thực hiện Fetch với chiến lược Exponential Backoff để xử lý lỗi mạng/throttling.
+         * Executes a fetch request with Exponential Backoff for handling throttling/network errors.
          */
         async function retryFetchWithBackoff(url, options, maxRetries = 5) {
             for (let i = 0; i < maxRetries; i++) {
@@ -84,8 +126,7 @@
                         await new Promise(resolve => setTimeout(resolve, delay));
                         continue;
                     }
-                    // Đối với các lỗi khác, thoát khỏi vòng lặp và ném lỗi
-                    // Thêm kiểm tra an toàn cho response.json()
+                    // Handle other errors
                     const contentType = response.headers.get("content-type");
                     if (contentType && contentType.indexOf("application/json") !== -1) {
                          const errorJson = await response.json();
@@ -97,7 +138,7 @@
 
                 } catch (error) {
                     if (i === maxRetries - 1) throw error;
-                    // Đối với lỗi mạng, thử lại
+                    // For network errors, retry
                     const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
                     console.warn(`Network error during attempt ${i + 1}. Retrying in ${delay.toFixed(0)}ms...`, error);
                     await new Promise(resolve => setTimeout(resolve, delay));
@@ -106,11 +147,10 @@
         }
 
 
-        // --- LOGIC ỨNG DỤNG ---
+        // --- APPLICATION LOGIC ---
 
         /**
-         * Cập nhật trạng thái tải và các nút
-         * @param {boolean} isLoading
+         * Updates the loading state and buttons
          */
         function setLoadingState(isLoading) {
             const startBtn = document.getElementById('startBtn');
@@ -118,18 +158,18 @@
 
             startBtn.disabled = isLoading;
             if (isLoading) {
-                startBtn.innerHTML = '<div class="spinner border-white border-t-white/50 w-5 h-5"></div> Đang Render...';
+                startBtn.innerHTML = '<div class="spinner w-5 h-5"></div> Rendering...';
                 loadingIndicator.classList.remove('hidden');
                 document.getElementById('downloadBtn').disabled = true;
-                document.getElementById('statusMessage').textContent = 'Đang gửi yêu cầu đến AI...';
+                document.getElementById('statusMessage').textContent = 'Sending request to AI...';
             } else {
-                startBtn.innerHTML = 'Bắt đầu Render (Start)';
+                startBtn.innerHTML = 'Start Rendering';
                 loadingIndicator.classList.add('hidden');
             }
         }
 
         /**
-         * Xử lý file ảnh được chọn
+         * Handles the selected image file
          */
         async function handleImageUpload(event) {
             const file = event.target.files[0];
@@ -139,67 +179,141 @@
             const startBtn = document.getElementById('startBtn');
 
             if (!file || !file.type.startsWith('image/')) {
-                statusMessage.textContent = 'Vui lòng chọn một file ảnh hợp lệ.';
+                statusMessage.textContent = 'Please select a valid image file.';
                 startBtn.disabled = true;
                 originalPreview.src = '';
                 originalPreview.classList.add('hidden');
-                renderedPreview.src = ''; // Xóa ảnh render cũ
+                renderedPreview.src = ''; 
                 renderedPreview.classList.add('hidden');
                 return;
             }
 
             try {
-                // Hiển thị hình ảnh gốc
+                // Display original image
                 originalPreview.src = URL.createObjectURL(file);
-                // Đảm bảo ảnh gốc hiển thị ngay
                 originalPreview.classList.remove('hidden');
 
-                // Xóa ảnh render cũ
+                // Clear previous rendered image
                 renderedPreview.src = ''; 
                 renderedPreview.classList.add('hidden');
                 document.getElementById('downloadBtn').disabled = true;
 
-                // Chuyển đổi và lưu Base64
+                // Convert and save Base64
                 uploadedBase64 = await fileToBase64(file);
                 uploadedMimeType = file.type;
 
-                statusMessage.textContent = `Đã tải lên: ${file.name}. Sẵn sàng để Render.`;
+                statusMessage.textContent = `Uploaded: ${file.name}. Ready to Render.`;
                 startBtn.disabled = false;
             } catch (error) {
-                statusMessage.textContent = 'Lỗi khi đọc file: ' + error.message;
-                console.error('Lỗi khi đọc file:', error);
+                statusMessage.textContent = 'Error reading file: ' + error.message;
+                console.error('Error reading file:', error);
                 startBtn.disabled = true;
             }
         }
+        
+        /**
+         * Builds the Prompt based on the selected options
+         */
+        function buildPrompt() {
+            // Existing Options
+            const bloom = document.getElementById('bloomSelect').value;
+            const time = document.getElementById('timeSelect').value;
+            const shadow = document.getElementById('shadowSelect').value;
+            const glossiness = document.getElementById('glossinessSelect').value;
+            const weather = document.getElementById('weatherSelect').value;
+            
+            // NEW Options
+            const perspective = document.getElementById('perspectiveSelect').value;
+            const fidelity = document.getElementById('fidelitySelect').value;
+            const color = document.getElementById('colorSelect').value;
+
+            let promptParts = [];
+            
+            // 1. Core Instruction 
+            promptParts.push("Re-render this image with extremely high graphics, high detail, ray tracing, 8K, photorealistic, Unreal Engine 5 quality");
+
+            // 2. Bloom
+            if (bloom === 'on') {
+                promptParts.push("add bloom effect, intense light flare");
+            } else {
+                promptParts.push("remove bloom effect");
+            }
+            
+            // 3. Time (Lighting)
+            if (time !== 'keep_original') {
+                promptParts.push(`change lighting to ${time}`);
+            } else {
+                 promptParts.push("keep original time of day/lighting");
+            }
+
+            // 4. Shadow 
+            if (shadow === 'realistic') {
+                promptParts.push("soft, realistic shadows, ambient occlusion");
+            } else if (shadow === 'strong') {
+                promptParts.push("extremely strong shadows, high contrast");
+            }
+
+            // 5. Glossiness
+            if (glossiness === 'on') {
+                promptParts.push("add high gloss, reflective surface (glossy, reflective surface)");
+            } else {
+                 promptParts.push("matte surface finish");
+            }
+            
+            // 6. Weather
+            if (weather !== 'keep_original') {
+                promptParts.push(`set the weather context to ${weather}`);
+            } else {
+                 promptParts.push("keep original weather context");
+            }
+
+            // 7. NEW: Perspective (Only add if not keeping original)
+            if (perspective !== 'keep_original') {
+                promptParts.push(`perspective: ${perspective}`);
+            }
+
+            // 8. NEW: Fidelity (Only add if not keeping original)
+            if (fidelity !== 'keep_original') {
+                promptParts.push(`texture fidelity: ${fidelity}`);
+            }
+            
+            // 9. NEW: Color Grading (Only add if not keeping original)
+            if (color !== 'keep_original') {
+                promptParts.push(`color grading: ${color}`);
+            }
+
+
+            // Combine all parts into the final prompt
+            return promptParts.join(', ');
+        }
+
 
         /**
-         * Gọi API Gemini để render lại hình ảnh
+         * Calls the Gemini API to re-render the image
          */
         async function startRendering() {
             if (!uploadedBase64) {
-                document.getElementById('statusMessage').textContent = 'Lỗi: Vui lòng tải lên hình ảnh trước.';
+                document.getElementById('statusMessage').textContent = 'Error: Please upload an image first.';
                 return;
             }
 
             setLoadingState(true);
             const renderedPreview = document.getElementById('renderedPreview');
             
-            // Đảm bảo ẩn hoàn toàn và xóa nguồn trước khi render mới
+            // Ensure image is hidden and source is cleared before new render
             renderedPreview.src = '';
             renderedPreview.classList.add('hidden');
 
-            // --- ĐÃ LOẠI BỎ KHUNG NHẬP KEY API ---
-            // Sử dụng chuỗi rỗng để Canvas tự động inject API Key (theo cấu hình môi trường)
+            // Use empty string for API Key to let Canvas environment inject it
             const finalApiKey = ""; 
             
-            // Cấu hình URL API với key
+            // Configure API URL with key
             const API_URL_WITH_KEY = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${finalApiKey}`;
 
+            // Get custom Prompt
+            const userPrompt = buildPrompt();
+            console.log("Generated Prompt:", userPrompt);
 
-            // CẤU HÌNH PROMPT ĐÃ ĐƯỢC TỐI ƯU
-            const systemInstruction = ""; // Bỏ trống
-            // Prompt hiện tại
-            const userPrompt = "render lại hình này với đồ họa cực cao, ko thay đổỉ texture, bóng loáng, shadow mạnh"; 
 
             const payload = {
                 contents: [{
@@ -217,136 +331,235 @@
                     responseModalities: ['IMAGE'],
                 },
                 systemInstruction: {
-                    parts: [{ text: systemInstruction }] // Gửi chuỗi rỗng
+                    parts: [{ text: "" }] // Empty system instruction part
                 }
             };
 
             try {
-                const response = await retryFetchWithBackoff(API_URL_WITH_KEY, { // SỬ DỤNG API_URL MỚI
+                const response = await retryFetchWithBackoff(API_URL_WITH_KEY, { 
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
 
-                // --- KIỂM TRA PHÒNG NGỪA LỖI (FIX) ---
                 if (!response) {
-                    throw new Error("Không nhận được phản hồi từ API sau nhiều lần thử lại. Vui lòng kiểm tra lại kết nối và API Key.");
+                    throw new Error("Did not receive a response from the API after multiple retries. Please check your connection.");
                 }
-                // ------------------------------------
                 
                 const result = await response.json();
                 
-                // Lấy finishReason
+                // Extract finishReason
                 const finishReason = result?.candidates?.[0]?.finishReason;
 
-                // Lấy dữ liệu hình ảnh (inlineData) đầu tiên trong danh sách parts
+                // Extract image data (inlineData)
                 const imagePart = result?.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
                 const base64Data = imagePart?.inlineData?.data;
 
                 if (!base64Data) {
                     const errorText = JSON.stringify(result, null, 2);
                     
-                    let errorMessage = 'Lỗi API: Không nhận được dữ liệu hình ảnh.';
+                    let errorMessage = 'API Error: Did not receive image data.';
                     
                     if (finishReason === 'NO_IMAGE') {
-                        // Thông báo lỗi chi tiết cho trường hợp NO_IMAGE
-                        errorMessage = 'Render bị chặn: AI không tạo hình ảnh (NO_IMAGE). Thường do hình ảnh gốc hoặc nội dung yêu cầu vi phạm chính sách an toàn. Vui lòng thử hình ảnh khác hoặc thay đổi prompt.';
+                        // Detailed error for NO_IMAGE
+                        errorMessage = 'Render Blocked: AI did not generate an image (NO_IMAGE). This usually happens when the original image or the request content violates safety policies. Please try a different image or modify the prompt.';
                     } else {
-                        errorMessage += (result?.error?.message ? ` Chi tiết: ${result.error.message}` : ' Lỗi không xác định.');
+                        errorMessage += (result?.error?.message ? ` Details: ${result.error.message}` : ' Unknown error.');
                     }
                     
                     document.getElementById('statusMessage').textContent = errorMessage;
-                    console.error('Lỗi API:', errorText);
+                    console.error('API Error:', errorText);
                     return;
                 }
 
                 renderedImageUrl = `data:image/png;base64,${base64Data}`;
                 renderedPreview.src = renderedImageUrl;
-                renderedPreview.classList.remove('hidden'); // Hiển thị sau khi gán nguồn
+                renderedPreview.classList.remove('hidden'); // Show after source is set
 
-                document.getElementById('statusMessage').textContent = 'Render thành công! Bạn có thể tải xuống hình ảnh.';
+                document.getElementById('statusMessage').textContent = 'Render successful! You can now download the image.';
                 document.getElementById('downloadBtn').disabled = false;
 
             } catch (error) {
-                document.getElementById('statusMessage').textContent = 'Lỗi Render: ' + error.message;
-                console.error('Lỗi Render:', error);
+                document.getElementById('statusMessage').textContent = 'Render Error: ' + error.message;
+                console.error('Render Error:', error);
             } finally {
                 setLoadingState(false);
             }
         }
 
         /**
-         * Tải xuống hình ảnh đã render
+         * Downloads the rendered image
          */
         function downloadImage() {
             if (!renderedImageUrl) {
-                document.getElementById('statusMessage').textContent = 'Chưa có hình ảnh nào được render để tải xuống.';
+                document.getElementById('statusMessage').textContent = 'No image has been rendered to download.';
                 return;
             }
 
             const link = document.createElement('a');
             link.href = renderedImageUrl;
-            link.download = `rendered_high_graphics_${Date.now()}.png`;
+            link.download = `rendered_custom_graphics_${Date.now()}.png`;
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-            document.getElementById('statusMessage').textContent = 'Hình ảnh đã được tải xuống.';
+            document.getElementById('statusMessage').textContent = 'Image downloaded.';
         }
 
-        // --- SETUP KHI TẢI TRANG HOÀN TẤT ---
+        // --- SETUP ON PAGE LOAD ---
         window.onload = function() {
             document.getElementById('imageFile').addEventListener('change', handleImageUpload);
             document.getElementById('startBtn').addEventListener('click', startRendering);
             document.getElementById('downloadBtn').addEventListener('click', downloadImage);
 
-            // Khởi tạo trạng thái ban đầu
+            // Initial state setup
             setLoadingState(false);
             document.getElementById('startBtn').disabled = true;
-            document.getElementById('statusMessage').textContent = 'Vui lòng chọn hình ảnh để bắt đầu.';
+            document.getElementById('statusMessage').textContent = 'Please select an image to begin.';
         }
 
     </script>
 </head>
-<body class="bg-gray-900 min-h-screen p-4 sm:p-8">
+<body class="bg-black min-h-screen p-4 sm:p-8 text-white">
 
-    <div class="max-w-4xl mx-auto bg-gray-800 shadow-2xl shadow-indigo-900/50 rounded-xl p-6 sm:p-8">
+    <div class="max-w-4xl mx-auto bg-black shadow-none rounded-none p-6 sm:p-8 border border-white">
 
-        <h1 class="text-3xl font-bold text-white mb-6 border-b border-gray-700 pb-2">
-            🎨 AI Render Đồ Họa Cực Cao (Phiên bản ổn định)
+        <h1 class="text-3xl font-bold mb-6 border-b border-white pb-2">
+            AI Custom High-Graphics Renderer
         </h1>
 
-        <!-- Hướng dẫn Setup cho Canvas/GitHub -->
-        <div class="bg-indigo-900/30 p-4 rounded-lg text-sm text-indigo-300 mb-6 border border-indigo-700">
-            <p class="font-bold mb-1">⚙️ Hướng dẫn Setup Key API:</p>
-            <p>Ứng dụng này được thiết kế để hoạt động trong môi trường **Canvas/Code Editor**.</p>
+        <!-- Setup Guide Section -->
+        <div class="setup-guide p-4 rounded-lg text-sm mb-6">
+            <p class="font-bold mb-1">⚙️ API Key Setup Guide:</p>
+            <p>This application is designed to operate within the **Canvas/Code Editor** environment.</p>
             <ul class="list-disc list-inside mt-1 ml-2">
-                <li>Trong môi trường này, Key API Gemini được **tự động cung cấp** qua các biến môi trường ẩn.</li>
-                <li>Nếu bạn triển khai code này trên các nền tảng khác (ví dụ: GitHub Pages), bạn cần thiết lập một cơ chế để đưa Key API của mình vào biến `finalApiKey` trong hàm `startRendering()` để ứng dụng hoạt động.</li>
+                <li>In this environment, the Gemini API Key is **automatically provided** via hidden environment variables.</li>
+                <li>If you deploy this code on other platforms (e.g., GitHub Pages), you need to set up a mechanism to inject your API Key into the `finalApiKey` variable in the `startRendering()` function for the application to work.</li>
             </ul>
         </div>
 
-        <!-- Khu vực điều khiển -->
+        <!-- Configuration Settings Section -->
+        <div class="space-y-4 mb-6">
+            <h2 class="text-xl font-semibold">⚙️ Configuration Settings</h2>
+            
+            <!-- ROW 1: General Graphics -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+                
+                <!-- Bloom Option -->
+                <div>
+                    <label for="bloomSelect" class="block text-sm font-medium mb-1">Bloom (Glow/Light)</label>
+                    <select id="bloomSelect" class="dark-input-select">
+                        <option value="on">On</option>
+                        <option value="off" selected>Off</option>
+                    </select>
+                </div>
+
+                <!-- Time Option -->
+                <div>
+                    <label for="timeSelect" class="block text-sm font-medium mb-1">Time (Lighting)</label>
+                    <select id="timeSelect" class="dark-input-select">
+                        <option value="keep_original" selected>Keep Original</option>
+                        <option value="morning sunlight (golden hour)">Morning (Golden Hour)</option>
+                        <option value="midday sun">Midday Sun</option>
+                        <option value="afternoon sunlight (sunset)">Afternoon (Sunset)</option>
+                        <option value="nighttime, neon lighting">Nighttime (Neon Lighting)</option>
+                    </select>
+                </div>
+                
+                <!-- Shadow Option -->
+                <div>
+                    <label for="shadowSelect" class="block text-sm font-medium mb-1">Shadow (Depth)</label>
+                    <select id="shadowSelect" class="dark-input-select">
+                        <option value="realistic" selected>Realistic</option>
+                        <option value="strong">Strong Contrast</option>
+                    </select>
+                </div>
+                
+                <!-- Glossiness Option -->
+                <div>
+                    <label for="glossinessSelect" class="block text-sm font-medium mb-1">Glossiness (Reflectivity)</label>
+                    <select id="glossinessSelect" class="dark-input-select">
+                        <option value="on">On</option>
+                        <option value="off" selected>Off</option>
+                    </select>
+                </div>
+
+                <!-- Weather Option -->
+                <div>
+                    <label for="weatherSelect" class="block text-sm font-medium mb-1">Weather (Atmosphere)</label>
+                    <select id="weatherSelect" class="dark-input-select">
+                        <option value="keep_original" selected>Keep Original</option>
+                        <option value="sunny and clear sky">Sunny and Clear</option>
+                        <option value="heavy rain and dark clouds">Heavy Rain</option>
+                        <option value="snowing and cold weather">Snowing</option>
+                        <option value="heavy fog and mysterious atmosphere">Heavy Fog</option>
+                    </select>
+                </div>
+
+            </div>
+            
+            <!-- ROW 2: Advanced Style/Mood -->
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-4 border-t border-white/50">
+                
+                <!-- NEW: Perspective Option -->
+                <div>
+                    <label for="perspectiveSelect" class="block text-sm font-medium mb-1">Perspective (Camera Angle)</label>
+                    <select id="perspectiveSelect" class="dark-input-select">
+                        <option value="keep_original" selected>Keep Original</option>
+                        <option value="cinematic, dramatic lighting">Cinematic (Dramatic)</option>
+                        <option value="low angle shot, looking up">Low Angle (Looking Up)</option>
+                        <option value="wide panoramic shot">Wide Panoramic Shot</option>
+                        <option value="close up macro shot">Close-up Macro Shot</option>
+                    </select>
+                </div>
+
+                <!-- NEW: Fidelity Option -->
+                <div>
+                    <label for="fidelitySelect" class="block text-sm font-medium mb-1">Texture Fidelity (Detail)</label>
+                    <select id="fidelitySelect" class="dark-input-select">
+                        <option value="keep_original" selected>Keep Original</option>
+                        <option value="PBR, highly detailed texture mapping">PBR (High Detail)</option>
+                        <option value="gritty, worn texture, scratches">Gritty (Worn Texture)</option>
+                        <option value="smooth, stylized, vibrant cartoon texture">Stylized (Vibrant)</option>
+                    </select>
+                </div>
+
+                <!-- NEW: Color Grading Option -->
+                <div>
+                    <label for="colorSelect" class="block text-sm font-medium mb-1">Color Grade (Mood)</label>
+                    <select id="colorSelect" class="dark-input-select">
+                        <option value="keep_original" selected>Keep Original</option>
+                        <option value="vibrant, high saturation">Vibrant (High Saturation)</option>
+                        <option value="dark, monochromatic, film noir">Film Noir (Dark/Mono)</option>
+                        <option value="neon glow, cyberpunk aesthetic">Neon Glow (Cyberpunk)</option>
+                        <option value="vintage, sepia tone">Vintage (Sepia Tone)</option>
+                    </select>
+                </div>
+
+            </div>
+        </div>
+
+        <!-- Action Controls Section -->
         <div class="space-y-6 mb-8">
             
-            <!-- Nút Import Hình Ảnh -->
+            <!-- Image Import Button -->
             <div>
-                <label for="imageFile" class="file-input-label block w-full text-center bg-indigo-600 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out">
+                <label for="imageFile" class="btn-black-outline block w-full text-center cursor-pointer">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 inline-block mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
                     </svg>
-                    Import Hình Ảnh (Import Image)
+                    Import Image
                 </label>
                 <input type="file" id="imageFile" accept="image/*" class="hidden">
             </div>
 
-            <!-- Nút Bắt đầu Render -->
-            <button id="startBtn" onclick="startRendering()" class="w-full flex justify-center items-center bg-green-600 text-white font-bold py-3 px-6 rounded-lg shadow-lg hover:bg-green-700 transition duration-300 ease-in-out disabled:bg-gray-600 disabled:cursor-not-allowed" disabled>
-                Bắt đầu Render (Start)
+            <!-- Start Render Button -->
+            <button id="startBtn" onclick="startRendering()" class="btn-black-outline w-full" disabled>
+                Start Rendering
             </button>
             
-            <!-- Thông báo trạng thái -->
-            <div id="statusMessage" class="text-center text-sm font-medium text-indigo-400">
-                Vui lòng chọn hình ảnh để bắt đầu.
+            <!-- Status Message -->
+            <div id="statusMessage" class="text-center text-sm font-medium text-white-400">
+                Please select an image to begin.
             </div>
 
             <!-- Loading Indicator -->
@@ -355,29 +568,30 @@
             </div>
         </div>
 
-        <!-- Khu vực xem trước và tải xuống -->
+        <!-- Preview and Download Section -->
         <div class="grid md:grid-cols-2 gap-6">
-            <!-- Hình ảnh Gốc -->
-            <div class="bg-gray-700 p-4 rounded-lg shadow-inner border border-gray-600">
-                <h3 class="text-lg font-semibold text-gray-200 mb-3">Hình Ảnh Gốc (Original Image)</h3>
-                <div class="image-container flex justify-center items-center rounded-md bg-gray-900/50">
-                    <img id="originalPreview" src="" alt="Hình ảnh gốc" class="image-preview hidden">
+            
+            <!-- Original Image -->
+            <div class="bg-black p-4 rounded-lg border border-white">
+                <h3 class="text-lg font-semibold mb-3">Original Image</h3>
+                <div class="image-container flex justify-center items-center rounded-md bg-black/50">
+                    <img id="originalPreview" src="" alt="Original image preview" class="image-preview hidden">
                 </div>
             </div>
             
-            <!-- Hình ảnh đã Render -->
-            <div class="bg-gray-700 p-4 rounded-lg shadow-inner border border-gray-600">
-                <h3 class="text-lg font-semibold text-gray-200 mb-3">Hình Ảnh Đã Render (Rendered Image)</h3>
-                <div class="image-container flex justify-center items-center rounded-md bg-gray-900/50">
-                    <img id="renderedPreview" src="" alt="Hình ảnh đã render" class="image-preview hidden">
+            <!-- Rendered Image -->
+            <div class="bg-black p-4 rounded-lg border border-white">
+                <h3 class="text-lg font-semibold mb-3">Rendered Image</h3>
+                <div class="image-container flex justify-center items-center rounded-md bg-black/50">
+                    <img id="renderedPreview" src="" alt="Rendered image preview" class="image-preview hidden">
                 </div>
 
-                <!-- Nút Tải Xuống -->
-                <button id="downloadBtn" onclick="downloadImage()" class="mt-4 w-full flex justify-center items-center bg-blue-600 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-blue-700 transition duration-300 ease-in-out disabled:bg-gray-600 disabled:cursor-not-allowed" disabled>
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+                <!-- Download Button -->
+                <button id="downloadBtn" onclick="downloadImage()" class="btn-black-outline mt-4 w-full" disabled>
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2 inline-block" viewBox="0 0 20 20" fill="currentColor">
                       <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L10 12.586l2.293-2.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" />
                     </svg>
-                    Tải Xuống (Download)
+                    Download
                 </button>
             </div>
         </div>
